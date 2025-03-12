@@ -12,43 +12,56 @@ class App:
         self.driver.close()
 
     def creation_graph(self):
-        #creation of the dual graph
+        # creation of the dual graph
         with self.driver.session() as session:
             result = session.write_transaction(self._creation_graph)
             return result
 
     @staticmethod
     def _creation_graph(tx):
-        #creation of nodes, a node for each street
+        # Creation of nodes, one for each street
         result = tx.run("""
-                        match (m:RoadJunction)-[r:ROUTE {status: 'active'}]->(n:RoadJunction) 
-                        with distinct r.osmid as street_names
-                        unwind street_names as street_name
-                        create (road:RoadOsm {osmid: street_name})
-                        with street_name
-                        match (m:RoadJunction)-[r1:ROUTE {osmid: street_name, status: 'active'}]->(n:RoadJunction)
-                        with avg(r1.AADT) as AADT, sum(r1.distance) as dist,street_name,r1.name as road_name
-                        match (d:RoadOsm {osmid: street_name}) set d.traffic = AADT/dist, status = 'active',
-                                        d.AADT=AADT,d.distance = dist,d.name= road_name
-                    """)
-        print(result.values())
-        #creation of relations, a relation for each connection 
-        #(a junction will be represented by more than one connection)
+            MATCH (m:RoadJunction)-[r:ROUTE {status: 'active'}]->(n:RoadJunction) 
+            WITH DISTINCT r.osmid AS street_names
+            UNWIND street_names AS street_name
+            CREATE (road:RoadOsm {osmid: street_name})
+            WITH street_name
+            MATCH (m:RoadJunction)-[r1:ROUTE {osmid: street_name, status: 'active'}]->(n:RoadJunction)
+            WITH AVG(r1.AADT) AS AADT, SUM(r1.distance) AS dist, street_name, r1.name AS road_name
+            MATCH (d:RoadOsm {osmid: street_name}) 
+            SET d.traffic = AADT / dist, 
+                d.status = 'active',
+                d.AADT = AADT,
+                d.distance = dist,
+                d.name = road_name
+            RETURN d
+        """)
+
+        values = result.values()
+        if values:
+            print(values)
+
+        # Creation of relationships between road sections
         result = tx.run("""
-                        match (m:RoadJunction)-[r:ROUTE]->(n:RoadJunction) 
-                        with distinct r.osmid as street_names
-                        unwind street_names as street_name
-                        match (m:RoadJunction)-[r1:ROUTE {osmid: street_name}]->(n:RoadJunction)
-                        with m,street_name
-                        match (x:RoadJunction)-[r2:ROUTE]->(m:RoadJunction)
-                        where r2.osmid <> street_name
-                        with r2.osmid as source,street_name,m
-                        match (r1:RoadOsm {osmid:source}),(r2:RoadOsm {osmid:street_name})
-                        create (r1)-[r:CONNECTED {junction: m.id,location: m.location}]->(r2)
-                    """)
-        print(result.values())
-        return result.values()
-        
+            MATCH (m:RoadJunction)-[r:ROUTE]->(n:RoadJunction) 
+            WITH DISTINCT r.osmid AS street_names
+            UNWIND street_names AS street_name
+            MATCH (m:RoadJunction)-[r1:ROUTE {osmid: street_name}]->(n:RoadJunction)
+            WITH m, street_name
+            MATCH (x:RoadJunction)-[r2:ROUTE]->(m:RoadJunction)
+            WHERE r2.osmid <> street_name
+            WITH r2.osmid AS source, street_name, m
+            MATCH (r1:RoadOsm {osmid: source}), (r2:RoadOsm {osmid: street_name})
+            CREATE (r1)-[r:CONNECTED {junction: m.id, location: m.location}]->(r2)
+            RETURN r
+        """)
+
+        values = result.values()
+        if values:
+            print(values)
+
+        return values
+
     def set_index(self):
         """create index on nodes"""
         with self.driver.session() as session:
@@ -61,6 +74,7 @@ class App:
                            create index on :RoadOsm(osmid)
                        """)
         return result.values()
+
 
 def add_options():
     parser = argparse.ArgumentParser(description='Creation of routing graph.')
@@ -75,15 +89,16 @@ def add_options():
                         required=True)
     return parser
 
+
 def main(args=None):
     argParser = add_options()
-    #retrieve arguments
+    # retrieve arguments
     options = argParser.parse_args(args=args)
-    #connecting to the neo4j instance
+    # connecting to the neo4j instance
     greeter = App(options.neo4jURL, options.neo4juser, options.neo4jpwd)
-    #creation of the dual graph
+    # creation of the dual graph
     greeter.creation_graph()
-    #set index on road nodes
+    # set index on road nodes
     greeter.set_index()
     greeter.close()
     return 0
