@@ -36,7 +36,7 @@ class App:
                         Call dbms.listConfig() yield name,value where name = 'dbms.directories.neo4j_home' return value;
                     """)
         return result.values()
-        
+
     def get_import_folder_name(self):
         """get the name of the import directory for the neo4j instance"""
         with self.driver.session() as session:
@@ -91,7 +91,7 @@ class App:
                            MATCH (n:RoadJunction)-[r:ROUTE]-() SET r.distance=tofloat(r.length), r.status='active'
                        """)
         return result.values()
-    
+
     def set_index(self):
         """create index on nodes"""
         with self.driver.session() as session:
@@ -104,7 +104,7 @@ class App:
                            create index on :RoadJunction(id)
                        """)
         return result.values()
-        
+
     def generate_spatial_layer(self):
         """generate the spatial layer of the project"""
         with self.driver.session() as session:
@@ -121,7 +121,7 @@ class App:
                 call spatial.addWKTLayer('spatial', 'geometry')
                 """)
         return result.values()
-        
+
     def import_nodes_in_spatial_layer(self):
         """insert the road junctions in the spatial layer of the project"""
         with self.driver.session() as session:
