@@ -87,20 +87,21 @@ class App:
 
     @staticmethod
     def _import_way(tx):
-        result = tx.run("""
-            CALL apoc.load.json("wayfile.json") YIELD value 
-            with value.elements AS elements
-            UNWIND elements AS way
-            MERGE (w:OSMWay:PointOfInterest {osm_id: way.id}) 
-                ON CREATE SET w.name = way.tags.name
-            MERGE (w)-[:TAGS]->(t:Tag) 
-                ON CREATE SET t += way.tags
-            WITH w, way.nodes AS nodes
-            UNWIND nodes AS node
-            MATCH (wn:OSMNode {osm_id: node})
-            MERGE (w)-[:PART_OF]->(wn)
-        """)
-        return result.values()
+    result = tx.run("""
+        CALL apoc.load.json("wayfile.json") YIELD value 
+        WITH value.elements AS elements
+        UNWIND elements AS way
+        MERGE (w:OSMWay:PointOfInterest {osm_id: way.id}) 
+            ON CREATE SET w.name = way.tags.name
+        MERGE (w)-[:TAGS]->(t:Tag) 
+            ON CREATE SET t += way.tags
+        WITH w, way.nodes AS nodes
+        UNWIND nodes AS node
+        MATCH (wn:OSMNode {osm_id: node})
+        MERGE (w)-[:PART_OF]->(wn)  // This ensures OSMWay is connected to OSMNode
+    """)
+    return result.values()
+
 
     def import_nodes_into_spatial_layer(self):
         """Import OSMWayNodes nodes in a Neo4j Spatial Layer"""
@@ -148,50 +149,51 @@ class App:
 
     @staticmethod
     def _connect_amenity(tx):
-        # Step 1: Connect POIs to nearest driveable RoadJunctions within 120m
-        result = tx.run("""
-            MATCH (p:PointOfInterest)
-            WITH p, p.location AS poi
-            MATCH (n:RoadJunction)
-            WHERE n.driveable = true AND distance(n.location, poi) < 120
-            MERGE (p)-[r:NEAR]->(n)
-            ON CREATE SET r.distance = distance(n.location, p.location), r.status = 'active'
-        """)
+    # Step 1: Connect POIs to nearest driveable RoadJunctions within 120m
+    result = tx.run("""
+        MATCH (p:PointOfInterest)
+        WITH p, p.location AS poi
+        MATCH (n:RoadJunction)
+        WHERE n.driveable = true AND distance(n.location, poi) < 120
+        MERGE (p)-[r:NEAR]->(n)
+        ON CREATE SET r.distance = distance(n.location, p.location), r.status = 'active'
+    """)
 
-        # Step 2: Connect OSMNode to nearest driveable RoadJunctions within 120m
-        result = tx.run("""
-            MATCH (n:OSMNode)
-            WITH n, n.location AS node_loc
-            MATCH (rj:RoadJunction)
-            WHERE rj.driveable = true AND distance(rj.location, node_loc) < 120
-            MERGE (n)-[r:NEAR]->(rj)
-            ON CREATE SET r.distance = distance(rj.location, node_loc), r.status = 'active'
-        """)
+    # Step 2: Connect OSMNode to nearest driveable RoadJunctions within 120m
+    result = tx.run("""
+        MATCH (n:OSMNode)
+        WITH n, n.location AS node_loc
+        MATCH (rj:RoadJunction)
+        WHERE rj.driveable = true AND distance(rj.location, node_loc) < 120
+        MERGE (n)-[r:NEAR]->(rj)
+        ON CREATE SET r.distance = distance(rj.location, node_loc), r.status = 'active'
+    """)
 
-        # Step 3: For OSMNode not connected to driveable RoadJunction within 120m, connect to nearest non-driveable RoadJunction
-        result = tx.run("""
-            MATCH (n:OSMNode)
-            WHERE NOT (n)-[:NEAR]->(:RoadJunction {driveable: true})
-            WITH n, n.location AS node_loc
-            MATCH (rj:RoadJunction)
-            WHERE rj.driveable = false AND distance(rj.location, node_loc) < 120
-            MERGE (n)-[r:NEAR]->(rj)
-            ON CREATE SET r.distance = distance(rj.location, node_loc), r.status = 'active'
-        """)
+    # Step 3: For OSMNode not connected to driveable RoadJunction within 120m, connect to nearest non-driveable RoadJunction
+    result = tx.run("""
+        MATCH (n:OSMNode)
+        WHERE NOT (n)-[:NEAR]->(:RoadJunction {driveable: true})
+        WITH n, n.location AS node_loc
+        MATCH (rj:RoadJunction)
+        WHERE rj.driveable = false AND distance(rj.location, node_loc) < 120
+        MERGE (n)-[r:NEAR]->(rj)
+        ON CREATE SET r.distance = distance(rj.location, node_loc), r.status = 'active'
+    """)
 
-        # Step 4: Ensure at least one OSMNode connected to a non-driveable RoadJunction is also connected to a driveable RoadJunction
-        result = tx.run("""
-            MATCH (n:OSMNode)-[:NEAR]->(rj:RoadJunction {driveable: false})
-            WITH n
-            MATCH (rj_driveable:RoadJunction {driveable: true})
-            WITH n, rj_driveable, distance(n.location, rj_driveable.location) AS dist
-            ORDER BY dist ASC
-            LIMIT 1
-            MERGE (n)-[r:NEAR]->(rj_driveable)
-            ON CREATE SET r.distance = dist, r.status = 'active'
-        """)
+    # Step 4: Ensure at least one OSMNode connected to a non-driveable RoadJunction is also connected to a driveable RoadJunction
+    result = tx.run("""
+        MATCH (n:OSMNode)-[:NEAR]->(rj:RoadJunction {driveable: false})
+        WITH n
+        MATCH (rj_driveable:RoadJunction {driveable: true})
+        WITH n, rj_driveable, distance(n.location, rj_driveable.location) AS dist
+        ORDER BY dist ASC
+        LIMIT 1
+        MERGE (n)-[r:NEAR]->(rj_driveable)
+        ON CREATE SET r.distance = dist, r.status = 'active'
+    """)
 
-        return result.values()
+    return result.values()
+
 
     def set_location(self):
         """Insert the location in the OSMWayNode."""
