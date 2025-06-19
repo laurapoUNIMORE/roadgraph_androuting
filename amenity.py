@@ -115,17 +115,18 @@ class App:
         return result.values()
 
     def set_location(self):
-            with self.driver.session() as session:
-                result = session.write_transaction(self._set_location)
-                return result
+        """Insert the location in the POI, OSMNode, and RoadJunction nodes."""
+        with self.driver.session() as session:
+            result = session.write_transaction(self._set_location)
+            return result
 
     @staticmethod
     def _set_location(tx):
-            result = tx.run("""
+        result = tx.run("""
                 MATCH (n:OSMNode) 
                 SET n.location = point({latitude: tofloat(n.lat), longitude: tofloat(n.lon)})
             """)
-            return result.values()
+        return result.values()
 
     def set_index(self):
         with self.driver.session() as session:
@@ -170,55 +171,62 @@ class App:
            """).consume()
 
     def connect_amenity(self):
-        """Connect POI and OSMNode to the nearest RoadJunction."""
+        """Connect the POI and OSMNode to the nearest RoadJunction."""
         with self.driver.session() as session:
             result = session.write_transaction(self._connect_amenity)
 
-    def _connect_amenity(self, tx):
-        # Step 1: Connect POIs to the nearest driveable RoadJunctions within 120m
-        tx.run("""
-               MATCH (p:PointOfInterest)
-               WITH p, p.location AS poi
-               MATCH (n:RoadJunction)
-               WHERE n.driveable = true AND distance(n.location, poi) < 120
-               MERGE (p)-[r:NEAR]->(n)
-               ON CREATE SET r.distance = distance(n.location, p.location), r.status = 'active'
-           """)
+    @staticmethod
+    def _connect_amenity(tx):
 
-        # Step 2: Connect OSMNodes to the nearest driveable RoadJunctions within 120m
-        tx.run("""
-               MATCH (n:OSMNode)
-               WITH n, n.location AS node_loc
-               MATCH (rj:RoadJunction)
-               WHERE rj.driveable = true AND distance(rj.location, node_loc) < 120
-               MERGE (n)-[r:NEAR]->(rj)
-               ON CREATE SET r.distance = distance(rj.location, node_loc), r.status = 'active'
-           """)
+        # Step 1:Find and create relationships between POIs and nearest RoadJunctions within 120m."""
+        result = tx.run("""
+                 MATCH (poi:PointOfInterest)<-[:PART_OF]-(osmn:OSMNode)
+                 WITH poi, osmn
+                 MATCH (rj:RoadJunction)
+                 WHERE distance(osmn.location, rj.location) < 120 AND rj.driveable = true
+                 MERGE (poi)-[r:NEAR]->(rj)
+                 ON CREATE SET r.distance = distance(osmn.location, rj.location), r.status = 'active'
+        """)
 
-        # Step 3: For OSMNodes not connected to a driveable RoadJunction, connect them to the nearest non-driveable RoadJunction
-        tx.run("""
-               MATCH (n:OSMNode)
-               WHERE NOT (n)-[:NEAR]->(:RoadJunction {driveable: true})
-               WITH n, n.location AS node_loc
-               MATCH (rj:RoadJunction)
-               WHERE rj.driveable = false AND distance(rj.location, node_loc) < 120
-               MERGE (n)-[r:NEAR]->(rj)
-               ON CREATE SET r.distance = distance(rj.location, node_loc), r.status = 'active'
-           """)
+        # Step 2: Connect OSMNode to nearest driveable RoadJunctions (within 120m)
+        result = tx.run("""
+                MATCH (osmn:OSMNode)
+                WITH osmn, osmn.location AS node_loc
+                MATCH (rj:RoadJunction)
+                WHERE rj.driveable = true AND distance(rj.location, node_loc) < 120
+                MERGE (osmn)-[r:NEAR]->(rj)   // Define relationship r
+                ON CREATE SET r.status = 'active', r.distance = distance(rj.location, node_loc)
+        """)
 
-        # Step 4: Ensure that at least one OSMNode connected to a non-driveable RoadJunction is also connected to a driveable RoadJunction
-        tx.run("""
-               MATCH (n:OSMNode)-[:NEAR]->(rj:RoadJunction {driveable: false})
-               WITH n
-               MATCH (rj_driveable:RoadJunction {driveable: true})
-               WITH n, rj_driveable, distance(n.location, rj_driveable.location) AS dist
-               ORDER BY dist ASC
-               LIMIT 1
-               MERGE (n)-[r:NEAR]->(rj_driveable)
-               ON CREATE SET r.distance = dist, r.status = 'active'
-           """)
+        # Step 3: For OSMNode not connected to driveable RoadJunction, connect to nearest non-driveable RoadJunction
+        result = tx.run("""
+                MATCH (osmn:OSMNode)
+                WHERE NOT (osmn)-[:NEAR]->(:RoadJunction {driveable: true})
+                WITH osmn, osmn.location AS node_loc
+                MATCH (rj:RoadJunction)
+                WHERE rj.driveable = false AND distance(rj.location, node_loc) < 120
+                MERGE (osmn)-[r:NEAR]->(rj)   // Define relationship r
+                ON CREATE SET r.status = 'active', r.distance = distance(rj.location, node_loc)
+        """)
 
-        return True
+        # Step 4: Ensure at least one OSMNode connected to a non-driveable RoadJunction is also connected to a driveable RoadJunction
+        result = tx.run("""
+                MATCH (osmn:OSMNode)-[:NEAR]->(rj:RoadJunction {driveable: false})
+                WITH osmn
+                MATCH (rj_driveable:RoadJunction {driveable: true})
+                WITH osmn, rj_driveable, distance(osmn.location, rj_driveable.location) AS dist
+                ORDER BY dist ASC
+                LIMIT 1
+                MERGE (osmn)-[r:NEAR]->(rj_driveable)   // Define relationship r
+                ON CREATE SET r.status = 'active', r.distance = dist
+        """)
+        # Step 5: Remove the relationship between OSMWay and RoadJunction if exists
+        result = tx.run("""
+                MATCH (p:OSMWay)-[r:NEAR]->(n:RoadJunction)
+                DELETE r
+            """)
+        return result.values()
+
 
 def add_options():
     parser = argparse.ArgumentParser(description='Insertion of POI in the graph.')
