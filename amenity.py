@@ -45,21 +45,20 @@ class App:
             return result
 
     @staticmethod
-def _import_node(tx):
-    result = tx.run("""
-        CALL apoc.load.json("nodefile.json") YIELD value AS value
-        WITH value.elements AS elements
-        UNWIND elements AS nodo
-        MERGE (n:PointOfInterest {osm_id: nodo.id})
-            ON CREATE SET n.name=nodo.tags.name
-        MERGE (n)-[:TAGS]->(t:Tag)
-            ON CREATE SET t += nodo.tags
-        MERGE (n)-[:PART_OF]->(wn:OSMNode {osm_id: nodo.id})
-            ON CREATE SET wn.lat=tofloat(nodo.lat), wn.lon=tofloat(nodo.lon),
-                wn.geometry= 'POINT(' + nodo.lat + ' ' + nodo.lon +')'
-    """)
-    return result.values()
-
+    def _import_node(tx):
+        result = tx.run("""
+            CALL apoc.load.json("nodefile.json") YIELD value AS value
+            WITH value.elements AS elements
+            UNWIND elements AS nodo
+            MERGE (n:PointOfInterest {osm_id: nodo.id})
+                ON CREATE SET n.name=nodo.tags.name
+            MERGE (n)-[:TAGS]->(t:Tag)
+                ON CREATE SET t += nodo.tags
+            MERGE (n)-[:PART_OF]->(wn:OSMNode {osm_id: nodo.id})
+                ON CREATE SET wn.lat=tofloat(nodo.lat), wn.lon=tofloat(nodo.lon),
+                    wn.geometry= 'POINT(' + nodo.lat + ' ' + nodo.lon +')'
+        """)
+        return result.values()
 
     def import_node_way(self):
         """import POI nodes in the graph."""
@@ -87,21 +86,21 @@ def _import_node(tx):
             return result
 
     @staticmethod
-def _import_way(tx):
-    result = tx.run("""
-        CALL apoc.load.json("wayfile.json") YIELD value 
-        with value.elements AS elements
-        UNWIND elements AS way
-        MERGE (w:OSMWay:PointOfInterest {osm_id: way.id}) 
-            ON CREATE SET w.name = way.tags.name
-        MERGE (w)-[:TAGS]->(t:Tag) 
-            ON CREATE SET t += way.tags
-        WITH w, way.nodes AS nodes
-        UNWIND nodes AS node
-        MATCH (wn:OSMNode {osm_id: node})
-        MERGE (w)-[:PART_OF]->(wn)
-    """)
-    return result.values()
+    def _import_way(tx):
+        result = tx.run("""
+            CALL apoc.load.json("wayfile.json") YIELD value 
+            with value.elements AS elements
+            UNWIND elements AS way
+            MERGE (w:OSMWay:PointOfInterest {osm_id: way.id}) 
+                ON CREATE SET w.name = way.tags.name
+            MERGE (w)-[:TAGS]->(t:Tag) 
+                ON CREATE SET t += way.tags
+            WITH w, way.nodes AS nodes
+            UNWIND nodes AS node
+            MATCH (wn:OSMNode {osm_id: node})
+            MERGE (w)-[:PART_OF]->(wn)
+        """)
+        return result.values()
 
     def import_nodes_into_spatial_layer(self):
         """Import OSMWayNodes nodes in a Neo4j Spatial Layer"""
@@ -116,7 +115,7 @@ def _import_way(tx):
                 CALL spatial.addNode('spatial', n) yield node return node;
                 """)
         return result.values()
-        
+
     def mark_driveable_roadjunctions(self):
         with self.driver.session() as session:
             session.write_transaction(self._mark_driveable_roadjunctions)
@@ -148,52 +147,51 @@ def _import_way(tx):
             result = session.write_transaction(self._connect_amenity)
 
     @staticmethod
-def _connect_amenity(tx):
-    # Step 1: Connect POIs to nearest driveable RoadJunctions within 120m
-    result = tx.run("""
-        MATCH (p:PointOfInterest)
-        WITH p, p.location AS poi
-        MATCH (n:RoadJunction)
-        WHERE n.driveable = true AND distance(n.location, poi) < 120
-        MERGE (p)-[r:NEAR]->(n)
-        ON CREATE SET r.distance = distance(n.location, p.location), r.status = 'active'
-    """)
+    def _connect_amenity(tx):
+        # Step 1: Connect POIs to nearest driveable RoadJunctions within 120m
+        result = tx.run("""
+            MATCH (p:PointOfInterest)
+            WITH p, p.location AS poi
+            MATCH (n:RoadJunction)
+            WHERE n.driveable = true AND distance(n.location, poi) < 120
+            MERGE (p)-[r:NEAR]->(n)
+            ON CREATE SET r.distance = distance(n.location, p.location), r.status = 'active'
+        """)
 
-    # Step 2: Connect OSMNode to nearest driveable RoadJunctions within 120m
-    result = tx.run("""
-        MATCH (n:OSMNode)
-        WITH n, n.location AS node_loc
-        MATCH (rj:RoadJunction)
-        WHERE rj.driveable = true AND distance(rj.location, node_loc) < 120
-        MERGE (n)-[r:NEAR]->(rj)
-        ON CREATE SET r.distance = distance(rj.location, node_loc), r.status = 'active'
-    """)
+        # Step 2: Connect OSMNode to nearest driveable RoadJunctions within 120m
+        result = tx.run("""
+            MATCH (n:OSMNode)
+            WITH n, n.location AS node_loc
+            MATCH (rj:RoadJunction)
+            WHERE rj.driveable = true AND distance(rj.location, node_loc) < 120
+            MERGE (n)-[r:NEAR]->(rj)
+            ON CREATE SET r.distance = distance(rj.location, node_loc), r.status = 'active'
+        """)
 
-    # Step 3: For OSMNode not connected to driveable RoadJunction within 120m, connect to nearest non-driveable RoadJunction
-    result = tx.run("""
-        MATCH (n:OSMNode)
-        WHERE NOT (n)-[:NEAR]->(:RoadJunction {driveable: true})
-        WITH n, n.location AS node_loc
-        MATCH (rj:RoadJunction)
-        WHERE rj.driveable = false AND distance(rj.location, node_loc) < 120
-        MERGE (n)-[r:NEAR]->(rj)
-        ON CREATE SET r.distance = distance(rj.location, node_loc), r.status = 'active'
-    """)
+        # Step 3: For OSMNode not connected to driveable RoadJunction within 120m, connect to nearest non-driveable RoadJunction
+        result = tx.run("""
+            MATCH (n:OSMNode)
+            WHERE NOT (n)-[:NEAR]->(:RoadJunction {driveable: true})
+            WITH n, n.location AS node_loc
+            MATCH (rj:RoadJunction)
+            WHERE rj.driveable = false AND distance(rj.location, node_loc) < 120
+            MERGE (n)-[r:NEAR]->(rj)
+            ON CREATE SET r.distance = distance(rj.location, node_loc), r.status = 'active'
+        """)
 
-    # Step 4: Ensure at least one OSMNode connected to a non-driveable RoadJunction is also connected to a driveable RoadJunction
-    result = tx.run("""
-        MATCH (n:OSMNode)-[:NEAR]->(rj:RoadJunction {driveable: false})
-        WITH n
-        MATCH (rj_driveable:RoadJunction {driveable: true})
-        WITH n, rj_driveable, distance(n.location, rj_driveable.location) AS dist
-        ORDER BY dist ASC
-        LIMIT 1
-        MERGE (n)-[r:NEAR]->(rj_driveable)
-        ON CREATE SET r.distance = dist, r.status = 'active'
-    """)
+        # Step 4: Ensure at least one OSMNode connected to a non-driveable RoadJunction is also connected to a driveable RoadJunction
+        result = tx.run("""
+            MATCH (n:OSMNode)-[:NEAR]->(rj:RoadJunction {driveable: false})
+            WITH n
+            MATCH (rj_driveable:RoadJunction {driveable: true})
+            WITH n, rj_driveable, distance(n.location, rj_driveable.location) AS dist
+            ORDER BY dist ASC
+            LIMIT 1
+            MERGE (n)-[r:NEAR]->(rj_driveable)
+            ON CREATE SET r.distance = dist, r.status = 'active'
+        """)
 
-    return result.values()
-
+        return result.values()
 
     def set_location(self):
         """Insert the location in the OSMWayNode."""
@@ -210,22 +208,23 @@ def _connect_amenity(tx):
         """)
         return result.values()
 
-def set_index(self):
-    """create index on nodes"""
-    with self.driver.session() as session:
-        result = session.write_transaction(self._set_index)
-        return result
+
+    def set_index(self):
+        """create index on nodes"""
+        with self.driver.session() as session:
+            result = session.write_transaction(self._set_index)
+            return result
 
 
-@staticmethod
-def _set_index(tx):
-    result = tx.run("""
+    @staticmethod
+    def _set_index(tx):
+        result = tx.run("""
                            create index on :OSMWayNode(osm_id);
                        """)
-    result = tx.run("""
+        result = tx.run("""
                            create index on :PointOfInterest(osm_id);
                        """)
-    return result.values()
+        return result.values()
 
 
 def add_options():
