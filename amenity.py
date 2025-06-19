@@ -45,20 +45,21 @@ class App:
             return result
 
     @staticmethod
-    def _import_node(tx):
-        result = tx.run("""
-                        CALL apoc.load.json("nodefile.json") YIELD value AS value 
-                        WITH value.elements AS elements
-                        UNWIND elements AS nodo
-                        MERGE (n:PointOfInterest {osm_id: nodo.id})-[:MEMBER]->(wn:OSMWayNode {osm_id: nodo.id})
-                            ON CREATE SET n.name=nodo.tags.name,wn.lat=tofloat(nodo.lat), 
-                                wn.lon=tofloat(nodo.lon), 
-                                wn.geometry= 'POINT(' + nodo.lat + ' ' + nodo.lon +')'
-                        WITH n, nodo
-                        MERGE (n)-[:TAGS]->(t:Tag)
-                            ON CREATE SET t += nodo.tags
-                        """)
-        return result.values()
+def _import_node(tx):
+    result = tx.run("""
+        CALL apoc.load.json("nodefile.json") YIELD value AS value
+        WITH value.elements AS elements
+        UNWIND elements AS nodo
+        MERGE (n:PointOfInterest {osm_id: nodo.id})
+            ON CREATE SET n.name=nodo.tags.name
+        MERGE (n)-[:TAGS]->(t:Tag)
+            ON CREATE SET t += nodo.tags
+        MERGE (n)-[:PART_OF]->(wn:OSMNode {osm_id: nodo.id})
+            ON CREATE SET wn.lat=tofloat(nodo.lat), wn.lon=tofloat(nodo.lon),
+                wn.geometry= 'POINT(' + nodo.lat + ' ' + nodo.lon +')'
+    """)
+    return result.values()
+
 
     def import_node_way(self):
         """import POI nodes in the graph."""
@@ -86,19 +87,21 @@ class App:
             return result
 
     @staticmethod
-    def _import_way(tx):
-        result = tx.run("""
-                        CALL apoc.load.json("wayfile.json") YIELD value 
-                        with value.elements AS elements
-                        UNWIND elements AS way
-                        MERGE (w:Way:PointOfInterest {osm_id: way.id}) ON CREATE SET w.name = way.tags.name
-                        MERGE (w)-[:TAGS]->(t:Tag) ON CREATE SET t += way.tags
-                        WITH w, way.nodes AS nodes
-                        UNWIND nodes AS node
-                        MATCH (wn:OSMWayNode {osm_id: node})
-                        MERGE (w)-[:MEMBER]->(wn)
-                        """)
-        return result.values()
+def _import_way(tx):
+    result = tx.run("""
+        CALL apoc.load.json("wayfile.json") YIELD value 
+        with value.elements AS elements
+        UNWIND elements AS way
+        MERGE (w:OSMWay:PointOfInterest {osm_id: way.id}) 
+            ON CREATE SET w.name = way.tags.name
+        MERGE (w)-[:TAGS]->(t:Tag) 
+            ON CREATE SET t += way.tags
+        WITH w, way.nodes AS nodes
+        UNWIND nodes AS node
+        MATCH (wn:OSMNode {osm_id: node})
+        MERGE (w)-[:PART_OF]->(wn)
+    """)
+    return result.values()
 
     def import_nodes_into_spatial_layer(self):
         """Import OSMWayNodes nodes in a Neo4j Spatial Layer"""
@@ -113,6 +116,31 @@ class App:
                 CALL spatial.addNode('spatial', n) yield node return node;
                 """)
         return result.values()
+        
+    def mark_driveable_roadjunctions(self):
+        with self.driver.session() as session:
+            session.write_transaction(self._mark_driveable_roadjunctions)
+
+    @staticmethod
+    def _mark_driveable_roadjunctions(tx):
+        tx.run("""
+               MATCH ()-[r:ROUTE]-()
+               WHERE r.driveable = 'True' OR r.driveable = 'true'
+               SET r.driveable = true
+           """).consume()
+
+        # Step 2: Default all junctions to false
+        tx.run("""
+               MATCH (n:RoadJunction)
+               SET n.driveable = false
+           """).consume()
+
+        # Step 3: Mark junctions connected to a deriveable route as true
+        tx.run("""
+               MATCH (n:RoadJunction)-[r:ROUTE]-()
+               WHERE r.driveable = true
+               SET n.driveable = true
+           """).consume()
 
     def connect_amenity(self):
         """Connect the OSMWayNode of the POI to the nearest Node in the graph."""
@@ -120,19 +148,52 @@ class App:
             result = session.write_transaction(self._connect_amenity)
 
     @staticmethod
-    def _connect_amenity(tx):
-        result = tx.run("""
-                        MATCH (p:OSMWayNode)
-                        WITH p, p.location AS poi
-                        MATCH (n:RoadJunction)
-                            WHERE distance(n.location, poi) < 100
-                            AND n <> p
-                        MERGE (p)-[r:NEAR]->(n)
-                            ON CREATE SET r.distance = distance(n.location, p.location), r.status = 'active'
-                        MERGE (p)<-[ri:NEAR]-(n)
-                            ON CREATE SET ri.distance = distance(n.location, p.location), ri.status = 'active'
-                    """)
-        return result.values()
+def _connect_amenity(tx):
+    # Step 1: Connect POIs to nearest driveable RoadJunctions within 120m
+    result = tx.run("""
+        MATCH (p:PointOfInterest)
+        WITH p, p.location AS poi
+        MATCH (n:RoadJunction)
+        WHERE n.driveable = true AND distance(n.location, poi) < 120
+        MERGE (p)-[r:NEAR]->(n)
+        ON CREATE SET r.distance = distance(n.location, p.location), r.status = 'active'
+    """)
+
+    # Step 2: Connect OSMNode to nearest driveable RoadJunctions within 120m
+    result = tx.run("""
+        MATCH (n:OSMNode)
+        WITH n, n.location AS node_loc
+        MATCH (rj:RoadJunction)
+        WHERE rj.driveable = true AND distance(rj.location, node_loc) < 120
+        MERGE (n)-[r:NEAR]->(rj)
+        ON CREATE SET r.distance = distance(rj.location, node_loc), r.status = 'active'
+    """)
+
+    # Step 3: For OSMNode not connected to driveable RoadJunction within 120m, connect to nearest non-driveable RoadJunction
+    result = tx.run("""
+        MATCH (n:OSMNode)
+        WHERE NOT (n)-[:NEAR]->(:RoadJunction {driveable: true})
+        WITH n, n.location AS node_loc
+        MATCH (rj:RoadJunction)
+        WHERE rj.driveable = false AND distance(rj.location, node_loc) < 120
+        MERGE (n)-[r:NEAR]->(rj)
+        ON CREATE SET r.distance = distance(rj.location, node_loc), r.status = 'active'
+    """)
+
+    # Step 4: Ensure at least one OSMNode connected to a non-driveable RoadJunction is also connected to a driveable RoadJunction
+    result = tx.run("""
+        MATCH (n:OSMNode)-[:NEAR]->(rj:RoadJunction {driveable: false})
+        WITH n
+        MATCH (rj_driveable:RoadJunction {driveable: true})
+        WITH n, rj_driveable, distance(n.location, rj_driveable.location) AS dist
+        ORDER BY dist ASC
+        LIMIT 1
+        MERGE (n)-[r:NEAR]->(rj_driveable)
+        ON CREATE SET r.distance = dist, r.status = 'active'
+    """)
+
+    return result.values()
+
 
     def set_location(self):
         """Insert the location in the OSMWayNode."""
@@ -284,6 +345,7 @@ def main(args=None):
     # adding the location property to the OSMWayNodes
     greeter.set_location()
     # connect POI with roads layer
+    greeter.mark_driveable_roadjunctions()
     greeter.connect_amenity()
     greeter.close()
 
