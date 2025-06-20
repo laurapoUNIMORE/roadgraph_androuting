@@ -151,23 +151,24 @@ class App:
 
     @staticmethod
     def _mark_driveable_roadjunctions(tx):
+        # Step 1: Ensure 'driveable' property is stored as boolean
         tx.run("""
                MATCH ()-[r:ROUTE]-()
                WHERE r.driveable = 'True' OR r.driveable = 'true'
-               SET r.driveable = true
+               SET r.driveable = 'True'
            """).consume()
 
-        # Step 2: Default all junctions to false
+        # Step 2: Default all RoadJunctions to false (using string 'False' for consistency)
         tx.run("""
                MATCH (n:RoadJunction)
-               SET n.driveable = false
+               SET n.driveable = 'False'
            """).consume()
 
-        # Step 3: Mark junctions connected to a deriveable route as true
+        # Step 3: Mark RoadJunctions connected to a driveable route as 'True'
         tx.run("""
                MATCH (n:RoadJunction)-[r:ROUTE]-()
-               WHERE r.driveable = true
-               SET n.driveable = true
+               WHERE r.driveable = 'True'
+               SET n.driveable = 'True'
            """).consume()
 
     def connect_amenity(self):
@@ -178,49 +179,61 @@ class App:
     @staticmethod
     def _connect_amenity(tx):
 
-        # Step 1:Find and create relationships between POIs and nearest RoadJunctions within 120m."""
+        # Step 1:Find and create relationships between POIs/OSMNode to nearest RoadJunctions within 120m."""
         result = tx.run("""
-                 MATCH (poi:PointOfInterest)<-[:PART_OF]-(osmn:OSMNode)
-                 WITH poi, osmn
-                 MATCH (rj:RoadJunction)
-                 WHERE distance(osmn.location, rj.location) < 120 AND rj.driveable = true
-                 MERGE (poi)-[r:NEAR]->(rj)
-                 ON CREATE SET r.distance = distance(osmn.location, rj.location), r.status = 'active'
+                MATCH (poi:PointOfInterest)<-[:PART_OF]-(osmn:OSMNode)
+                WHERE exists(osmn.lat) AND exists(osmn.lon)
+                WITH poi, osmn, point({latitude: toFloat(osmn.lat), longitude: toFloat(osmn.lon)}) AS poiLoc
+                MATCH (rj:RoadJunction)
+                WHERE rj.driveable = 'True' AND exists(rj.location) AND distance(rj.location, poiLoc) < 120
+                WITH poi, osmn, rj, distance(rj.location, poiLoc) AS dist
+                ORDER BY dist
+                WITH poi, osmn, collect({rj: rj, dist: dist})[0] AS nearest
+                WITH poi, osmn, nearest.rj AS nearestRJ, nearest.dist AS nearestDist
+                MERGE (poi)-[r1:NEAR]->(nearestRJ)
+                  ON CREATE SET r1.distance = nearestDist, r1.status = 'driveable_nearest'
+                MERGE (osmn)-[r2:NEAR]->(nearestRJ)
+                  ON CREATE SET r2.distance = nearestDist, r2.status = 'driveable_nearest'
+
         """)
 
-        # Step 2: Connect OSMNode to nearest driveable RoadJunctions (within 120m)
+        # Step 2: Connect POIs/OSMNode to nearest driveable RoadJunctions to nearest non-driveable RoadJunction
+        result = tx.run("""
+                MATCH (poi:PointOfInterest)<-[:PART_OF]-(osmn:OSMNode)
+                WHERE NOT (osmn)-[:NEAR]->(:RoadJunction)
+                 AND exists(osmn.lat) AND exists(osmn.lon)
+                WITH poi, osmn, point({latitude: toFloat(osmn.lat), longitude: toFloat(osmn.lon)}) AS poiLoc
+                MATCH (rj:RoadJunction)
+                WHERE rj.driveable = 'False' AND exists(rj.location) AND distance(rj.location, poiLoc) < 120
+                WITH poi, osmn, rj, distance(rj.location, poiLoc) AS dist
+                ORDER BY dist
+                WITH poi, osmn, collect({rj: rj, dist: dist})[0] AS nearest
+                WITH poi, osmn, nearest.rj AS nearestRJ, nearest.dist AS nearestDist
+                MERGE (poi)-[r1:NEAR]->(nearestRJ)
+                  ON CREATE SET r1.distance = nearestDist, r1.status = 'non_driveable_nearest'
+                MERGE (osmn)-[r2:NEAR]->(nearestRJ)
+                  ON CREATE SET r2.distance = nearestDist, r2.status = 'non_driveable_nearest'
+
+        """)
+
+        # Step 3: Ensure at least one OSMNode connected to a non-driveable RoadJunction is also connected to a driveable RoadJunction
         result = tx.run("""
                 MATCH (osmn:OSMNode)
-                WITH osmn, osmn.location AS node_loc
-                MATCH (rj:RoadJunction)
-                WHERE rj.driveable = true AND distance(rj.location, node_loc) < 120
-                MERGE (osmn)-[r:NEAR]->(rj)   // Define relationship r
-                ON CREATE SET r.status = 'active', r.distance = distance(rj.location, node_loc)
+                WHERE NOT (osmn)-[:NEAR]->(:RoadJunction)
+                  AND exists(osmn.lat) AND exists(osmn.lon)
+                WITH osmn, point({latitude: toFloat(osmn.lat), longitude: toFloat(osmn.lon)}) AS osmLoc
+                CALL {
+                  WITH osmn, osmLoc
+                  MATCH (rj:RoadJunction)
+                  WHERE rj.driveable = 'True' AND exists(rj.location)
+                  RETURN rj, distance(osmLoc, rj.location) AS dist
+                  ORDER BY dist ASC
+                  LIMIT 1
+                }
+                MERGE (osmn)-[r:NEAR]->(rj)
+                SET r.distance = dist, r.status = 'nearest_driveable'
         """)
-
-        # Step 3: For OSMNode not connected to driveable RoadJunction, connect to nearest non-driveable RoadJunction
-        result = tx.run("""
-                MATCH (osmn:OSMNode)
-                WHERE NOT (osmn)-[:NEAR]->(:RoadJunction {driveable: true})
-                WITH osmn, osmn.location AS node_loc
-                MATCH (rj:RoadJunction)
-                WHERE rj.driveable = false AND distance(rj.location, node_loc) < 120
-                MERGE (osmn)-[r:NEAR]->(rj)   // Define relationship r
-                ON CREATE SET r.status = 'active', r.distance = distance(rj.location, node_loc)
-        """)
-
-        # Step 4: Ensure at least one OSMNode connected to a non-driveable RoadJunction is also connected to a driveable RoadJunction
-        result = tx.run("""
-                MATCH (osmn:OSMNode)-[:NEAR]->(rj:RoadJunction {driveable: false})
-                WITH osmn
-                MATCH (rj_driveable:RoadJunction {driveable: true})
-                WITH osmn, rj_driveable, distance(osmn.location, rj_driveable.location) AS dist
-                ORDER BY dist ASC
-                LIMIT 1
-                MERGE (osmn)-[r:NEAR]->(rj_driveable)   // Define relationship r
-                ON CREATE SET r.status = 'active', r.distance = dist
-        """)
-        # Step 5: Remove the relationship between OSMWay and RoadJunction if exists
+        # Step 4: Remove the relationship between OSMWay and RoadJunction if exists
         result = tx.run("""
                 MATCH (p:OSMWay)-[r:NEAR]->(n:RoadJunction)
                 DELETE r
